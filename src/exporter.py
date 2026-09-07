@@ -530,6 +530,18 @@ class Exporter:  # pylint: disable=too-many-instance-attributes,too-many-branche
             )
             while True:
                 try:
+                    # RabbitMQ >= 4.3 denies transient non-exclusive queues by default; this
+                    # exporter's event and control queues are both transient and non-exclusive
+                    # by default. Checked every attempt, so a broker reachable only on a later
+                    # retry still counts.
+                    if rabbitmq_requires_exclusive_queues(connection):
+                        logger.info(
+                            "Detected RabbitMQ >= 4.3, declaring exclusive event and control "
+                            "queues"
+                        )
+                        self.app.conf["event_queue_exclusive"] = True
+                        self.app.conf["control_queue_exclusive"] = True
+
                     recv = self.app.events.Receiver(connection, handlers=handlers)  # type: ignore
                     recv.capture(limit=None, timeout=None, wakeup=True)  # type: ignore
 
@@ -634,3 +646,21 @@ def rabbitmq_queue_info(connection, queue: str):
             logger.debug(f"Queue '{queue}' not found")
             return None
         raise ex
+
+
+def rabbitmq_requires_exclusive_queues(connection) -> bool:
+    """
+    RabbitMQ >= 4.3 denies transient non-exclusive queues by default (the deprecated
+    transient_nonexcl_queues feature), so celery's event receiver and pidbox reply queues need
+    to be declared exclusive on such a broker. Detected from the AMQP handshake's
+    server_properties instead of assumed, so older RabbitMQ versions and non-RabbitMQ
+    transports (e.g. redis) keep upstream's default (non-exclusive) behavior.
+    """
+    server_properties = getattr(connection.connection, "server_properties", None) or {}
+    if server_properties.get("product") != "RabbitMQ":
+        return False
+    try:
+        major, minor = (int(part) for part in server_properties["version"].split(".")[:2])
+    except (KeyError, ValueError):
+        return False
+    return (major, minor) >= (4, 3)
