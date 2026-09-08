@@ -472,7 +472,7 @@ class Exporter:  # pylint: disable=too-many-instance-attributes,too-many-branche
         )
         logger.debug("Updated gauge='{}' value='{}'", self.celery_worker_up._name, up)
 
-    def run(self, click_params):
+    def run(self, click_params):  # pylint: disable=too-many-locals,too-many-statements
         logger.remove()
         logger.add(sys.stdout, level=click_params["log_level"])
         self.app = Celery(broker=click_params["broker_url"])
@@ -521,19 +521,14 @@ class Exporter:  # pylint: disable=too-many-instance-attributes,too-many-branche
             handlers[key] = self.track_task_event
 
         with self.app.connection() as connection:  # type: ignore
-            start_http_server(
-                self.registry,
-                connection,
-                click_params["host"],
-                click_params["port"],
-                self.scrape,
-            )
+            http_server_started = False
             while True:
                 try:
                     # RabbitMQ >= 4.3 denies transient non-exclusive queues by default; this
                     # exporter's event and control queues are both transient and non-exclusive
                     # by default. Checked every attempt, so a broker reachable only on a later
-                    # retry still counts.
+                    # retry still counts. Must run before start_http_server(): self.app.control
+                    # is a cached_property that bakes in control_queue_exclusive at first access.
                     if rabbitmq_requires_exclusive_queues(connection):
                         logger.info(
                             "Detected RabbitMQ >= 4.3, declaring exclusive event and control "
@@ -541,6 +536,16 @@ class Exporter:  # pylint: disable=too-many-instance-attributes,too-many-branche
                         )
                         self.app.conf["event_queue_exclusive"] = True
                         self.app.conf["control_queue_exclusive"] = True
+
+                    if not http_server_started:
+                        start_http_server(
+                            self.registry,
+                            connection,
+                            click_params["host"],
+                            click_params["port"],
+                            self.scrape,
+                        )
+                        http_server_started = True
 
                     recv = self.app.events.Receiver(connection, handlers=handlers)  # type: ignore
                     recv.capture(limit=None, timeout=None, wakeup=True)  # type: ignore
